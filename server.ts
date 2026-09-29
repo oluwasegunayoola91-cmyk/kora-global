@@ -104,6 +104,16 @@ app.post('/api/orders', async (req: Request, res: Response): Promise<void> => {
       orderStored: true,
       emailSent: emailResult.sent,
       emailMethod: emailResult.method,
+      emailDeliveryDiagnostic: {
+        orderId: newOrder.orderId,
+        recipient: ADMIN_EMAIL,
+        fromAddress: emailResult.sender,
+        emailProvider: emailResult.method,
+        emailProviderMessageId: emailResult.messageId || 'NONE',
+        providerStatus: emailResult.providerStatus,
+        errorMessage: emailResult.errorReason || null,
+        warning: emailResult.warning || null,
+      },
     });
   } catch (error: any) {
     console.error('Server error processing order:', error);

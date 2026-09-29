@@ -1,1 +1,56 @@
-[]
+[
+  {
+    "orderId": "KORA-338939",
+    "fullName": "Segun Ayoola",
+    "phone": "08104320603",
+    "email": "oluwasegunayoola91@gmail.com",
+    "address": "25 Bayewu Street, Abeokuta",
+    "state": "Ogun",
+    "lga": "Abeokuta North",
+    "product": "KORA Foldable Mosquito Net",
+    "size": "6 × 6",
+    "quantity": 1,
+    "unitPrice": 28000,
+    "total": 28000,
+    "date": "29 September 2026",
+    "time": "13:48 UTC",
+    "createdAt": "2026-09-29T13:48:45.397Z",
+    "status": "pending_dispatch"
+  },
+  {
+    "orderId": "KORA-495911",
+    "fullName": "Segun Test",
+    "phone": "08104320603",
+    "email": "test@example.com",
+    "address": "15 Lagos Street",
+    "state": "Lagos",
+    "lga": "Ikeja",
+    "product": "KORA Foldable Mosquito Net",
+    "size": "6 × 6",
+    "quantity": 1,
+    "unitPrice": 28000,
+    "total": 28000,
+    "date": "29 September 2026",
+    "time": "13:47 UTC",
+    "createdAt": "2026-09-29T13:47:35.637Z",
+    "status": "pending_dispatch"
+  },
+  {
+    "orderId": "KORA-285664",
+    "fullName": "Ayoola Oluwasegun",
+    "phone": "08104320603",
+    "email": "oluwasegunayoola91@gmail.com",
+    "address": "25 BAYEWU street olueo kolobo abeokuta\n25 BAYEWU street olueo kolobo abeokuta",
+    "state": "Ogun",
+    "lga": "egbeda",
+    "product": "KORA Foldable Mosquito Net",
+    "size": "6 × 6",
+    "quantity": 1,
+    "unitPrice": 28000,
+    "total": 28000,
+    "date": "29 September 2026",
+    "time": "13:25 UTC",
+    "createdAt": "2026-09-29T13:25:24.611Z",
+    "status": "pending_dispatch"
+  }
+]

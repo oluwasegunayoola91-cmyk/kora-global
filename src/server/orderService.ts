@@ -218,15 +218,29 @@ Additional Information:
   return { subject, plainText, htmlContent };
 }
 
+export interface EmailSendResult {
+  sent: boolean;
+  method: string;
+  sender: string;
+  recipient: string;
+  messageId?: string;
+  providerStatus: 'delivered' | 'accepted' | 'queued' | 'bounced' | 'failed' | 'logged_only';
+  statusCode?: number;
+  errorReason?: string;
+  details?: string;
+  warning?: string;
+}
+
 export async function sendOrderNotificationEmail(
   order: any
-): Promise<{ sent: boolean; method: string; messageId?: string; details?: string; warning?: string }> {
+): Promise<EmailSendResult> {
   const timestamp = new Date().toISOString();
   const { subject, plainText, htmlContent } = buildEmailContent(order);
 
   // 1. Check for Resend API configuration
-  // Valid Resend keys start with 're_'
-  const rawResendKey = process.env.RESEND_API_KEY || (process.env.API_KEY?.startsWith('re_') ? process.env.API_KEY : '');
+  const rawResendKey =
+    process.env.RESEND_API_KEY ||
+    (process.env.API_KEY?.startsWith('re_') ? process.env.API_KEY : '');
   const resendApiKey = rawResendKey?.trim();
 
   if (resendApiKey) {
@@ -265,7 +279,6 @@ export async function sendOrderNotificationEmail(
         let statusDetails: any = null;
 
         try {
-          // Brief pause to allow Resend to queue/attempt delivery
           await new Promise((resolve) => setTimeout(resolve, 600));
           const statusRes = await fetch(`https://api.resend.com/emails/${messageId}`, {
             headers: { Authorization: `Bearer ${resendApiKey}` },
@@ -278,11 +291,10 @@ export async function sendOrderNotificationEmail(
           // Status polling non-fatal
         }
 
-        // Check for known Resend sandbox delivery limitation
         let warning: string | undefined;
         if (fromAddress.includes('onboarding@resend.dev')) {
           warning =
-            'Note: Using "onboarding@resend.dev". Resend only delivers to the email that registered the Resend account. Also check Gmail Spam/Promotions folder.';
+            'CRITICAL: Using sandbox "onboarding@resend.dev". Resend will ONLY deliver to the single email address used to register your Resend account. Also check Gmail Spam/Promotions tab.';
         }
 
         recordDeliveryLog({
@@ -298,10 +310,26 @@ export async function sendOrderNotificationEmail(
           rawResponse: statusDetails || resData,
         });
 
+        console.log(`
+================================================================
+KORA GLOBAL ORDER EMAIL DIAGNOSTIC TRACE
+ORDER ID:                   ${order.orderId}
+RECIPIENT:                  ${ADMIN_EMAIL}
+FROM ADDRESS:               ${fromAddress}
+EMAIL PROVIDER:             Resend API
+EMAIL PROVIDER MESSAGE ID:  ${messageId}
+PROVIDER STATUS:            ${liveStatus.toUpperCase()}
+ERROR MESSAGE:              None
+================================================================`);
+
         return {
           sent: true,
           method: 'Resend',
+          sender: fromAddress,
+          recipient: ADMIN_EMAIL,
           messageId,
+          providerStatus: liveStatus,
+          statusCode: response.status,
           details: `Accepted by Resend API (Status: ${liveStatus}).`,
           warning,
         };
@@ -320,9 +348,26 @@ export async function sendOrderNotificationEmail(
           rawResponse: resData,
         });
 
+        console.error(`
+================================================================
+KORA GLOBAL ORDER EMAIL DIAGNOSTIC TRACE (FAILED)
+ORDER ID:                   ${order.orderId}
+RECIPIENT:                  ${ADMIN_EMAIL}
+FROM ADDRESS:               ${fromAddress}
+EMAIL PROVIDER:             Resend API
+EMAIL PROVIDER MESSAGE ID:  NONE
+PROVIDER STATUS:            FAILED (HTTP ${response.status})
+ERROR MESSAGE:              ${errorReason}
+================================================================`);
+
         return {
           sent: false,
           method: 'Resend',
+          sender: fromAddress,
+          recipient: ADMIN_EMAIL,
+          providerStatus: 'failed',
+          statusCode: response.status,
+          errorReason,
           details: `Resend HTTP ${response.status}: ${errorReason}`,
         };
       }
@@ -341,6 +386,10 @@ export async function sendOrderNotificationEmail(
       return {
         sent: false,
         method: 'Resend',
+        sender: fromAddress,
+        recipient: ADMIN_EMAIL,
+        providerStatus: 'failed',
+        errorReason: err.message,
         details: `Network error connecting to Resend: ${err.message}`,
       };
     }
@@ -353,10 +402,11 @@ export async function sendOrderNotificationEmail(
       `"KORA Global Orders" <${process.env.SMTP_USER || process.env.GMAIL_USER || 'no-reply@koraglobal.com'}>`;
 
     try {
+      const isGmail = Boolean(process.env.GMAIL_USER || process.env.SMTP_HOST?.includes('gmail'));
       const transporter = nodemailer.createTransport({
-        host: process.env.SMTP_HOST || (process.env.GMAIL_USER ? 'smtp.gmail.com' : undefined),
-        port: process.env.SMTP_PORT ? parseInt(process.env.SMTP_PORT, 10) : 587,
-        secure: process.env.SMTP_SECURE === 'true' || process.env.SMTP_PORT === '465',
+        host: process.env.SMTP_HOST || (isGmail ? 'smtp.gmail.com' : undefined),
+        port: process.env.SMTP_PORT ? parseInt(process.env.SMTP_PORT, 10) : (isGmail ? 465 : 587),
+        secure: process.env.SMTP_SECURE === 'true' || isGmail || process.env.SMTP_PORT === '465',
         auth: {
           user: process.env.SMTP_USER || process.env.GMAIL_USER,
           pass: process.env.SMTP_PASS || process.env.GMAIL_APP_PASSWORD,
@@ -374,6 +424,7 @@ export async function sendOrderNotificationEmail(
 
       const messageId = info.messageId;
       const isAccepted = Array.isArray(info.accepted) && info.accepted.includes(ADMIN_EMAIL);
+      const providerStatus = isAccepted ? 'delivered' : 'queued';
 
       recordDeliveryLog({
         timestamp,
@@ -383,7 +434,7 @@ export async function sendOrderNotificationEmail(
         recipient: ADMIN_EMAIL,
         subject,
         messageId,
-        providerStatus: isAccepted ? 'delivered' : 'queued',
+        providerStatus,
         rawResponse: {
           accepted: info.accepted,
           rejected: info.rejected,
@@ -391,10 +442,25 @@ export async function sendOrderNotificationEmail(
         },
       });
 
+      console.log(`
+================================================================
+KORA GLOBAL ORDER EMAIL DIAGNOSTIC TRACE
+ORDER ID:                   ${order.orderId}
+RECIPIENT:                  ${ADMIN_EMAIL}
+FROM ADDRESS:               ${fromAddress}
+EMAIL PROVIDER:             SMTP Server (${process.env.SMTP_HOST || 'smtp.gmail.com'})
+EMAIL PROVIDER MESSAGE ID:  ${messageId}
+PROVIDER STATUS:            ${providerStatus.toUpperCase()}
+ERROR MESSAGE:              None (SMTP Response: ${info.response})
+================================================================`);
+
       return {
         sent: true,
-        method: 'SMTP',
+        method: isGmail ? 'Gmail SMTP' : 'Custom SMTP',
+        sender: fromAddress,
+        recipient: ADMIN_EMAIL,
         messageId,
+        providerStatus,
         details: `SMTP Server accepted: ${info.response}`,
       };
     } catch (err: any) {
@@ -409,30 +475,66 @@ export async function sendOrderNotificationEmail(
         errorReason: err.message,
       });
 
+      console.error(`
+================================================================
+KORA GLOBAL ORDER EMAIL DIAGNOSTIC TRACE (FAILED)
+ORDER ID:                   ${order.orderId}
+RECIPIENT:                  ${ADMIN_EMAIL}
+FROM ADDRESS:               ${fromAddress}
+EMAIL PROVIDER:             SMTP
+EMAIL PROVIDER MESSAGE ID:  NONE
+PROVIDER STATUS:            FAILED
+ERROR MESSAGE:              ${err.message}
+================================================================`);
+
       return {
         sent: false,
         method: 'SMTP',
+        sender: fromAddress,
+        recipient: ADMIN_EMAIL,
+        providerStatus: 'failed',
+        errorReason: err.message,
         details: `SMTP Error: ${err.message}`,
       };
     }
   }
 
-  // 3. Fallback: Local Server Logging
+  // 3. Fallback: No Credentials Found in Environment
+  const fallbackSender = 'unconfigured-server-internal';
+  const missingError =
+    'MISSING ENVIRONMENT VARIABLES: Neither RESEND_API_KEY nor SMTP credentials (GMAIL_USER / GMAIL_APP_PASSWORD) are set in the deployment environment.';
+
   recordDeliveryLog({
     timestamp,
     orderId: order.orderId,
     provider: 'LocalLog',
-    sender: 'system-internal',
+    sender: fallbackSender,
     recipient: ADMIN_EMAIL,
     subject,
     providerStatus: 'logged_only',
-    errorReason: 'No RESEND_API_KEY, SMTP_HOST, or GMAIL credentials found in environment variables.',
+    errorReason: missingError,
   });
+
+  console.warn(`
+================================================================
+KORA GLOBAL ORDER EMAIL DIAGNOSTIC TRACE (FAILED - NO PROVIDER)
+ORDER ID:                   ${order.orderId}
+RECIPIENT:                  ${ADMIN_EMAIL}
+FROM ADDRESS:               ${fallbackSender}
+EMAIL PROVIDER:             None (Local Logging Fallback)
+EMAIL PROVIDER MESSAGE ID:  NONE
+PROVIDER STATUS:            FAILED (NOT DELIVERED TO GMAIL)
+ERROR MESSAGE:              ${missingError}
+================================================================`);
 
   return {
     sent: false,
-    method: 'LocalLog',
-    details: 'Order logged and stored. Add RESEND_API_KEY or SMTP credentials in Netlify to deliver live emails.',
+    method: 'LocalLog (No Provider Configured)',
+    sender: fallbackSender,
+    recipient: ADMIN_EMAIL,
+    providerStatus: 'logged_only',
+    errorReason: missingError,
+    details: missingError,
   };
 }
 

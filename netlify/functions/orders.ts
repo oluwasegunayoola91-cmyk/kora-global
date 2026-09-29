@@ -120,6 +120,16 @@ export const handler = async (event: any, _context: any) => {
         orderStored: true,
         emailSent: emailResult.sent,
         emailMethod: emailResult.method,
+        emailDeliveryDiagnostic: {
+          orderId: newOrder.orderId,
+          recipient: ADMIN_EMAIL,
+          fromAddress: emailResult.sender,
+          emailProvider: emailResult.method,
+          emailProviderMessageId: emailResult.messageId || 'NONE',
+          providerStatus: emailResult.providerStatus,
+          errorMessage: emailResult.errorReason || null,
+          warning: emailResult.warning || null,
+        },
       }),
     };
   } catch (error: any) {
