@@ -120,6 +120,52 @@ app.get('/api/orders', (_req: Request, res: Response) => {
   res.json({ success: true, count: orders.length, orders });
 });
 
+// API: Email Delivery Diagnostics & Troubleshooting
+app.get('/api/diagnostics', async (_req: Request, res: Response) => {
+  const { getEmailDiagnostics } = await import('./src/server/orderService');
+  res.json({ success: true, diagnostics: getEmailDiagnostics() });
+});
+
+// API: Send Test Order Email directly to oluwasegunayoola91@gmail.com
+app.post('/api/test-email', async (_req: Request, res: Response) => {
+  const { sendOrderNotificationEmail, getEmailDiagnostics, ADMIN_EMAIL } = await import(
+    './src/server/orderService'
+  );
+  const testOrder = {
+    orderId: `TEST-${Math.floor(100000 + Math.random() * 900000)}`,
+    fullName: 'Test Customer',
+    phone: '08012345678',
+    email: 'test@example.com',
+    address: '12 Test Delivery Street, Ikeja',
+    state: 'Lagos',
+    lga: 'Ikeja',
+    product: 'KORA Foldable Mosquito Net',
+    size: '6 × 6',
+    quantity: 1,
+    unitPrice: 28000,
+    total: 28000,
+    date: new Date().toLocaleDateString('en-NG', {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+    }),
+    time: new Date().toLocaleTimeString('en-NG', {
+      hour: '2-digit',
+      minute: '2-digit',
+      timeZoneName: 'short',
+    }),
+    status: 'diagnostic_test',
+  };
+
+  const emailResult = await sendOrderNotificationEmail(testOrder);
+  res.json({
+    success: emailResult.sent,
+    recipient: ADMIN_EMAIL,
+    emailResult,
+    diagnostics: getEmailDiagnostics(),
+  });
+});
+
 // Setup Vite middleware in dev or static files in production
 async function startServer() {
   if (!isProduction) {

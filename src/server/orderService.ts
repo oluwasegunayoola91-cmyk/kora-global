@@ -12,6 +12,44 @@ export function formatNaira(amount: number): string {
   return `₦${amount.toLocaleString('en-NG')}`;
 }
 
+export interface EmailDeliveryRecord {
+  timestamp: string;
+  orderId: string;
+  provider: 'Resend' | 'SMTP' | 'LocalLog' | 'None';
+  sender: string;
+  recipient: string;
+  subject: string;
+  messageId?: string;
+  providerStatus: 'delivered' | 'accepted' | 'queued' | 'bounced' | 'failed' | 'logged_only';
+  statusCode?: number;
+  errorReason?: string;
+  rawResponse?: any;
+}
+
+// Global in-memory log buffer for recent email dispatches (last 20)
+export const recentEmailDeliveryLogs: EmailDeliveryRecord[] = [];
+
+function recordDeliveryLog(log: EmailDeliveryRecord) {
+  recentEmailDeliveryLogs.unshift(log);
+  if (recentEmailDeliveryLogs.length > 20) {
+    recentEmailDeliveryLogs.pop();
+  }
+
+  // Clear formatted server-side console logging
+  console.log('================================================================');
+  console.log(`[EMAIL DISPATCH ${log.providerStatus === 'failed' ? 'FAILED' : 'REPORT'}] - ${log.timestamp}`);
+  console.log(`- Order ID:        ${log.orderId}`);
+  console.log(`- Provider:        ${log.provider}`);
+  console.log(`- Sender (FROM):   ${log.sender}`);
+  console.log(`- Recipient (TO):  ${log.recipient}`);
+  console.log(`- Message ID:      ${log.messageId || 'N/A'}`);
+  console.log(`- Provider Status: ${log.providerStatus.toUpperCase()}`);
+  if (log.statusCode) console.log(`- HTTP Status:     ${log.statusCode}`);
+  if (log.errorReason) console.log(`- Error / Reason:  ${log.errorReason}`);
+  if (log.rawResponse) console.log(`- Raw Details:     ${JSON.stringify(log.rawResponse)}`);
+  console.log('================================================================');
+}
+
 export function validateOrderInput(body: any): { valid: boolean; error?: string; cleanData?: any } {
   const { fullName, phone, email, address, state, lga, size, quantity } = body || {};
 
@@ -80,9 +118,7 @@ export function validateOrderInput(body: any): { valid: boolean; error?: string;
   };
 }
 
-export async function sendOrderNotificationEmail(
-  order: any
-): Promise<{ sent: boolean; method: string; details?: string }> {
+export function buildEmailContent(order: any): { subject: string; plainText: string; htmlContent: string } {
   const subject = `NEW KORA GLOBAL ORDER — ${order.fullName.toUpperCase()} — ${order.size}`;
 
   const plainText = `KORA GLOBAL — NEW ORDER
@@ -179,9 +215,23 @@ Additional Information:
 </html>
 `;
 
-  // Method 1: Resend API (recommended for Netlify & serverless)
-  const resendApiKey = process.env.RESEND_API_KEY || process.env.API_KEY;
+  return { subject, plainText, htmlContent };
+}
+
+export async function sendOrderNotificationEmail(
+  order: any
+): Promise<{ sent: boolean; method: string; messageId?: string; details?: string; warning?: string }> {
+  const timestamp = new Date().toISOString();
+  const { subject, plainText, htmlContent } = buildEmailContent(order);
+
+  // 1. Check for Resend API configuration
+  // Valid Resend keys start with 're_'
+  const rawResendKey = process.env.RESEND_API_KEY || (process.env.API_KEY?.startsWith('re_') ? process.env.API_KEY : '');
+  const resendApiKey = rawResendKey?.trim();
+
   if (resendApiKey) {
+    const fromAddress = process.env.EMAIL_FROM || 'KORA Global Orders <onboarding@resend.dev>';
+
     try {
       const response = await fetch('https://api.resend.com/emails', {
         method: 'POST',
@@ -190,29 +240,118 @@ Additional Information:
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          from: process.env.EMAIL_FROM || 'KORA Global Orders <onboarding@resend.dev>',
+          from: fromAddress,
           to: [ADMIN_EMAIL],
+          reply_to: order.email || undefined,
           subject: subject,
           text: plainText,
           html: htmlContent,
         }),
       });
 
-      if (response.ok) {
-        const resData = await response.json();
-        console.log('Order notification email successfully dispatched via Resend:', resData);
-        return { sent: true, method: 'Resend', details: JSON.stringify(resData) };
+      const responseBody = await response.text();
+      let resData: any = {};
+      try {
+        resData = JSON.parse(responseBody);
+      } catch {
+        resData = { text: responseBody };
+      }
+
+      if (response.ok && resData.id) {
+        const messageId = resData.id;
+
+        // Query Resend for real-time delivery status
+        let liveStatus: 'delivered' | 'accepted' | 'queued' | 'bounced' | 'failed' = 'accepted';
+        let statusDetails: any = null;
+
+        try {
+          // Brief pause to allow Resend to queue/attempt delivery
+          await new Promise((resolve) => setTimeout(resolve, 600));
+          const statusRes = await fetch(`https://api.resend.com/emails/${messageId}`, {
+            headers: { Authorization: `Bearer ${resendApiKey}` },
+          });
+          if (statusRes.ok) {
+            statusDetails = await statusRes.json();
+            liveStatus = statusDetails.last_event || statusDetails.status || 'accepted';
+          }
+        } catch {
+          // Status polling non-fatal
+        }
+
+        // Check for known Resend sandbox delivery limitation
+        let warning: string | undefined;
+        if (fromAddress.includes('onboarding@resend.dev')) {
+          warning =
+            'Note: Using "onboarding@resend.dev". Resend only delivers to the email that registered the Resend account. Also check Gmail Spam/Promotions folder.';
+        }
+
+        recordDeliveryLog({
+          timestamp,
+          orderId: order.orderId,
+          provider: 'Resend',
+          sender: fromAddress,
+          recipient: ADMIN_EMAIL,
+          subject,
+          messageId,
+          providerStatus: liveStatus,
+          statusCode: response.status,
+          rawResponse: statusDetails || resData,
+        });
+
+        return {
+          sent: true,
+          method: 'Resend',
+          messageId,
+          details: `Accepted by Resend API (Status: ${liveStatus}).`,
+          warning,
+        };
       } else {
-        const errText = await response.text();
-        console.error('Resend API returned error:', errText);
+        const errorReason = resData.message || resData.error || responseBody;
+        recordDeliveryLog({
+          timestamp,
+          orderId: order.orderId,
+          provider: 'Resend',
+          sender: fromAddress,
+          recipient: ADMIN_EMAIL,
+          subject,
+          providerStatus: 'failed',
+          statusCode: response.status,
+          errorReason,
+          rawResponse: resData,
+        });
+
+        return {
+          sent: false,
+          method: 'Resend',
+          details: `Resend HTTP ${response.status}: ${errorReason}`,
+        };
       }
     } catch (err: any) {
-      console.error('Error sending email via Resend API:', err.message);
+      recordDeliveryLog({
+        timestamp,
+        orderId: order.orderId,
+        provider: 'Resend',
+        sender: fromAddress,
+        recipient: ADMIN_EMAIL,
+        subject,
+        providerStatus: 'failed',
+        errorReason: err.message,
+      });
+
+      return {
+        sent: false,
+        method: 'Resend',
+        details: `Network error connecting to Resend: ${err.message}`,
+      };
     }
   }
 
-  // Method 2: Standard SMTP / Nodemailer
+  // 2. Check for SMTP / Nodemailer configuration
   if (process.env.SMTP_HOST || process.env.SMTP_USER || process.env.GMAIL_USER) {
+    const fromAddress =
+      process.env.EMAIL_FROM ||
+      `"KORA Global Orders" <${process.env.SMTP_USER || process.env.GMAIL_USER || 'no-reply@koraglobal.com'}>`;
+
     try {
       const transporter = nodemailer.createTransport({
         host: process.env.SMTP_HOST || (process.env.GMAIL_USER ? 'smtp.gmail.com' : undefined),
@@ -225,32 +364,125 @@ Additional Information:
       });
 
       const info = await transporter.sendMail({
-        from:
-          process.env.EMAIL_FROM ||
-          `"KORA Global Orders" <${process.env.SMTP_USER || process.env.GMAIL_USER || 'no-reply@koraglobal.com'}>`,
+        from: fromAddress,
         to: ADMIN_EMAIL,
+        replyTo: order.email || undefined,
         subject: subject,
         text: plainText,
         html: htmlContent,
       });
 
-      console.log('Order notification email sent via SMTP:', info.messageId);
-      return { sent: true, method: 'SMTP', details: info.messageId };
+      const messageId = info.messageId;
+      const isAccepted = Array.isArray(info.accepted) && info.accepted.includes(ADMIN_EMAIL);
+
+      recordDeliveryLog({
+        timestamp,
+        orderId: order.orderId,
+        provider: 'SMTP',
+        sender: fromAddress,
+        recipient: ADMIN_EMAIL,
+        subject,
+        messageId,
+        providerStatus: isAccepted ? 'delivered' : 'queued',
+        rawResponse: {
+          accepted: info.accepted,
+          rejected: info.rejected,
+          response: info.response,
+        },
+      });
+
+      return {
+        sent: true,
+        method: 'SMTP',
+        messageId,
+        details: `SMTP Server accepted: ${info.response}`,
+      };
     } catch (err: any) {
-      console.error('Error sending email via SMTP:', err.message);
+      recordDeliveryLog({
+        timestamp,
+        orderId: order.orderId,
+        provider: 'SMTP',
+        sender: fromAddress,
+        recipient: ADMIN_EMAIL,
+        subject,
+        providerStatus: 'failed',
+        errorReason: err.message,
+      });
+
+      return {
+        sent: false,
+        method: 'SMTP',
+        details: `SMTP Error: ${err.message}`,
+      };
     }
   }
 
-  // Fallback logging for audit trail
-  console.log('----------------------------------------------------');
-  console.log(`[ORDER NOTIFICATION EMAIL FOR ${ADMIN_EMAIL}]`);
-  console.log(`SUBJECT: ${subject}`);
-  console.log(plainText);
-  console.log('----------------------------------------------------');
+  // 3. Fallback: Local Server Logging
+  recordDeliveryLog({
+    timestamp,
+    orderId: order.orderId,
+    provider: 'LocalLog',
+    sender: 'system-internal',
+    recipient: ADMIN_EMAIL,
+    subject,
+    providerStatus: 'logged_only',
+    errorReason: 'No RESEND_API_KEY, SMTP_HOST, or GMAIL credentials found in environment variables.',
+  });
 
   return {
     sent: false,
     method: 'LocalLog',
-    details: 'Order logged and stored. Configure RESEND_API_KEY or SMTP credentials to deliver real-time SMTP emails.',
+    details: 'Order logged and stored. Add RESEND_API_KEY or SMTP credentials in Netlify to deliver live emails.',
+  };
+}
+
+/**
+ * Diagnostic analysis function to diagnose the complete delivery chain
+ */
+export function getEmailDiagnostics(): Record<string, any> {
+  const rawResend = process.env.RESEND_API_KEY || (process.env.API_KEY?.startsWith('re_') ? process.env.API_KEY : '');
+  const hasResend = Boolean(rawResend && rawResend.trim());
+  const hasSmtp = Boolean(process.env.SMTP_HOST || process.env.SMTP_USER || process.env.GMAIL_USER);
+
+  let activeProvider = 'None (Local Logging Fallback)';
+  if (hasResend) activeProvider = 'Resend API';
+  else if (hasSmtp) activeProvider = 'SMTP (Nodemailer)';
+
+  const configuredFrom =
+    process.env.EMAIL_FROM ||
+    (hasResend
+      ? 'KORA Global Orders <onboarding@resend.dev>'
+      : `"KORA Global Orders" <${process.env.SMTP_USER || process.env.GMAIL_USER || 'no-reply@koraglobal.com'}>`);
+
+  const fromDomain = configuredFrom.includes('@') ? configuredFrom.split('@')[1].replace('>', '').trim() : 'unknown';
+  const isUsingResendDev = fromDomain === 'resend.dev';
+
+  return {
+    timestamp: new Date().toISOString(),
+    configuredRecipient: ADMIN_EMAIL,
+    activeProvider,
+    configuredFrom,
+    fromDomain,
+    isUsingResendDev,
+    credentialsStatus: {
+      hasResendApiKey: hasResend,
+      resendKeyPrefix: hasResend ? rawResend.slice(0, 6) + '...' : null,
+      hasSmtpUser: Boolean(process.env.SMTP_USER || process.env.GMAIL_USER),
+      hasSmtpPass: Boolean(process.env.SMTP_PASS || process.env.GMAIL_APP_PASSWORD),
+      smtpHost: process.env.SMTP_HOST || (process.env.GMAIL_USER ? 'smtp.gmail.com' : null),
+    },
+    domainVerificationAnalysis: isUsingResendDev
+      ? {
+          status: 'UNVERIFIED_SHARED_SANDBOX',
+          explanation:
+            'You are using Resend’s default test address "onboarding@resend.dev". Resend allows this address ONLY to send to the exact email address you used to sign up for Resend. Furthermore, Gmail frequently routes emails from "onboarding@resend.dev" to the Spam or Promotions folder.',
+          actionRequired:
+            '1. Check your Gmail Spam folder for emails from onboarding@resend.dev. 2. Verify that your Resend account was registered under oluwasegunayoola91@gmail.com. 3. For 100% reliable inbox delivery to any address, add and verify your own domain (e.g. koraglobal.com) in Resend Domains.',
+        }
+      : {
+          status: 'CUSTOM_DOMAIN',
+          explanation: `Using custom domain "${fromDomain}". This domain must have verified DKIM and SPF records in your email provider dashboard.`,
+        },
+    recentDeliveryLogs: recentEmailDeliveryLogs.slice(0, 5),
   };
 }

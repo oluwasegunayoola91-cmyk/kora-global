@@ -3,6 +3,7 @@ import path from 'path';
 import {
   validateOrderInput,
   sendOrderNotificationEmail,
+  getEmailDiagnostics,
   ADMIN_EMAIL,
 } from '../../src/server/orderService';
 
@@ -44,6 +45,7 @@ export const handler = async (event: any, _context: any) => {
 
   // Handle health check / GET request
   if (event.httpMethod === 'GET') {
+    const diagnostics = getEmailDiagnostics();
     return {
       statusCode: 200,
       headers: CORS_HEADERS,
@@ -51,6 +53,7 @@ export const handler = async (event: any, _context: any) => {
         success: true,
         message: 'KORA Global Netlify Orders Function is healthy',
         adminNotificationEmail: ADMIN_EMAIL,
+        diagnostics,
       }),
     };
   }
